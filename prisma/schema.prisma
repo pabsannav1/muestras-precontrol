@@ -1,0 +1,203 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Desarrollo: SQLite. Producción: cambiar provider a "postgresql".
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Rol {
+  ADMIN
+  TECNICO
+}
+
+enum EstadoParte {
+  PLANIFICADO
+  EN_CURSO
+  COMPLETADO
+  VALIDADO
+  CANCELADO
+}
+
+// Visita del plan anual del contrato
+enum TipoVisita {
+  LIMPIEZA // limpieza y desinfección a la firma del contrato
+  TOMA_1 // 15–30 días después de la limpieza
+  TOMA_2 // a los 3 meses
+  TOMA_3 // a los 6 meses
+  TOMA_4 // a los 9 meses
+  EXTRA // por positivos en los controles
+}
+
+enum EstadoIA {
+  SIN_CLAVE // falta GEMINI_API_KEY: pendiente de leer
+  OK
+  ERROR
+}
+
+enum EstadoMuestra {
+  PENDIENTE
+  TOMADA
+}
+
+model Usuario {
+  id           String   @id @default(cuid())
+  nombre       String
+  rol          Rol
+  email        String?  @unique
+  passwordHash String?
+  pinHash      String?
+  color        String   @default("#2563eb")
+  activo       Boolean  @default(true)
+  creadoEn     DateTime @default(now())
+
+  partesAsignados Parte[]    @relation("TecnicoParte")
+  partesCreados   Parte[]    @relation("CreadorParte")
+  muestrasTomadas Muestra[]
+  auditLogs       AuditLog[]
+}
+
+model Cliente {
+  id        String   @id @default(cuid())
+  // No único: un mismo código puede agrupar varios centros
+  codigo    String
+  nombre    String
+  direccion String?
+  poblacion String?
+  contacto  String?
+  telefono  String?
+  email     String?
+  notas     String?
+  numeroContrato   String?
+  // Firma del contrato (inicio del plan: limpieza) y renovación, a las 00:00 UTC
+  fechaContrato    DateTime?
+  fechaRenovacion  DateTime?
+  activo    Boolean  @default(true)
+  creadoEn  DateTime @default(now())
+
+  partes Parte[]
+
+  @@index([codigo])
+}
+
+model TipoAnalisis {
+  id       String    @id @default(cuid())
+  nombre   String    @unique
+  activo   Boolean   @default(true)
+  orden    Int       @default(0)
+  muestras Muestra[]
+}
+
+model TipoAgua {
+  id       String    @id @default(cuid())
+  nombre   String    @unique
+  activo   Boolean   @default(true)
+  orden    Int       @default(0)
+  muestras Muestra[]
+}
+
+model Parte {
+  id            String      @id @default(cuid())
+  // Legible: P-2026-0001
+  numero        String      @unique
+  clienteId     String
+  tecnicoId     String?
+  // Día previsto, guardado a las 00:00 UTC
+  fechaPrevista DateTime
+  numPedido     String?
+  estado        EstadoParte @default(PLANIFICADO)
+  tipoVisita    TipoVisita?
+  // Algún resultado del laboratorio sale en rojo: revisar
+  atencion      Boolean     @default(false)
+  observaciones String?
+  creadoPorId   String
+  creadoEn      DateTime    @default(now())
+  actualizadoEn DateTime    @updatedAt
+
+  cliente   Cliente   @relation(fields: [clienteId], references: [id])
+  tecnico   Usuario?  @relation("TecnicoParte", fields: [tecnicoId], references: [id])
+  creadoPor Usuario   @relation("CreadorParte", fields: [creadoPorId], references: [id])
+  muestras   Muestra[]
+  resultados ResultadoPdf[]
+
+  @@index([fechaPrevista])
+  @@index([tecnicoId, fechaPrevista])
+}
+
+model Muestra {
+  id             String        @id @default(cuid())
+  parteId        String
+  // T-1, T-2… autogenerada por parte
+  referencia     String
+  orden          Int
+  tipoAnalisisId String
+  tipoAguaId     String
+  estado         EstadoMuestra @default(PENDIENTE)
+
+  puntoRecogida  String?
+  temperatura    Float?
+  temperaturaAC  Float?
+  cloro          Float?
+  conductividad  Float?
+  ph             Float?
+  hierro         Float?
+  // Día de toma (00:00 UTC) y hora "HH:MM"
+  fechaToma      DateTime?
+  horaToma       String?
+
+  observaciones  String?
+  tomadaPorId    String?
+  tomadaEn       DateTime?
+  actualizadoEn  DateTime      @updatedAt
+
+  parte        Parte        @relation(fields: [parteId], references: [id], onDelete: Cascade)
+  tipoAnalisis TipoAnalisis @relation(fields: [tipoAnalisisId], references: [id])
+  tipoAgua     TipoAgua     @relation(fields: [tipoAguaId], references: [id])
+  tomadaPor    Usuario?     @relation(fields: [tomadaPorId], references: [id])
+
+  @@unique([parteId, referencia])
+  @@index([parteId, orden])
+}
+
+// PDF de resultados del laboratorio, leído con Gemini
+model ResultadoPdf {
+  id        String   @id @default(cuid())
+  parteId   String
+  nombre    String
+  // Ruta relativa dentro de STORAGE_DIR
+  ruta      String
+  tamano    Int
+  subidoEn  DateTime @default(now())
+  estadoIA  EstadoIA @default(SIN_CLAVE)
+  // JSON: { parametros: [{ muestra, parametro, valor, unidad, enRojo }], resumen }
+  analisis  String?
+  hayRojos  Boolean  @default(false)
+  error     String?
+
+  parte Parte @relation(fields: [parteId], references: [id], onDelete: Cascade)
+
+  @@index([parteId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  usuarioId String?
+  entidad   String
+  entidadId String
+  accion    String
+  // JSON serializado (SQLite no tiene tipo Json nativo)
+  cambios   String?
+  fecha     DateTime @default(now())
+
+  usuario Usuario? @relation(fields: [usuarioId], references: [id])
+
+  @@index([entidad, entidadId])
+}
+
+// Contador anual para la numeración de partes
+model Contador {
+  anio   Int @id
+  ultimo Int @default(0)
+}
